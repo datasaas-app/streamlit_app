@@ -1,4 +1,4 @@
-# app.py
+# app.py (VM-only version)
 import streamlit as st
 import requests
 import uuid
@@ -6,26 +6,28 @@ import pandas as pd
 import seaborn as sns
 import sweetviz as sv
 from sklearn.datasets import load_iris, load_diabetes
+from urllib.parse import urlencode
 
 st.set_page_config(page_title="Analytics App", layout="wide")
 
 # -----------------------
 # CONFIG / SECRETS
 # -----------------------
-# secrets.toml should contain:
+# .streamlit/secrets.toml:
 # [google]
 # client_id = "xxx.apps.googleusercontent.com"
 # client_secret = "yyy"
-#
 # [app]
-# LOCAL_URL = "http://localhost:8501"   # exact URI you registered in Google Cloud
+# DEPLOY_URL = "https://datasaas.store"  # your VM domain
+# LOCAL_URL = "http://localhost:8501"    # optional for local testing
 
 CLIENT_ID = st.secrets["google"]["client_id"]
 CLIENT_SECRET = st.secrets["google"]["client_secret"]
+DEPLOY_URL = st.secrets["app"]["DEPLOY_URL"]
 LOCAL_URL = st.secrets["app"].get("LOCAL_URL", "http://localhost:8501")
 
-REDIRECT_URI = LOCAL_URL  # ensure this exactly matches what's in Google Cloud Console
-
+# Use DEPLOY_URL only for redirect URI
+REDIRECT_URI = DEPLOY_URL
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -35,7 +37,6 @@ SCOPE = "openid email profile"
 # Helpers: OAuth requests
 # -----------------------
 def build_login_link(state: str):
-    # Note: redirect_uri must match exactly what's registered.
     params = {
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
@@ -45,7 +46,6 @@ def build_login_link(state: str):
         "access_type": "offline",
         "prompt": "consent",
     }
-    from urllib.parse import urlencode
     return f"{AUTH_URL}?{urlencode(params)}"
 
 def exchange_code_for_token(code: str):
@@ -77,32 +77,45 @@ if "oauth_state" not in st.session_state:
     st.session_state["oauth_state"] = None
 
 # -----------------------
-# OAuth callback handling
+# OAuth callback handling (verify 'state')
 # -----------------------
 qp = st.query_params
 if "code" in qp and st.session_state["oauth_token"] is None:
-    # get code value (list or str)
     code = qp["code"][0] if isinstance(qp["code"], list) else qp["code"]
+    returned_state = qp.get("state")
+    returned_state = returned_state[0] if isinstance(returned_state, list) else returned_state
+
+    # Verify state exists and matches session
+    if not returned_state or st.session_state.get("oauth_state") is None:
+        st.error("OAuth state missing; possible CSRF attempt. Re-initiate login.")
+        st.query_params = {}
+        st.stop()
+
+    if returned_state != st.session_state["oauth_state"]:
+        st.error("OAuth state mismatch; possible CSRF attack. Login aborted.")
+        st.session_state["oauth_state"] = None
+        st.query_params = {}
+        st.stop()
+
+    # State matches — exchange code for token
     try:
         token_json = exchange_code_for_token(code)
         access_token = token_json.get("access_token")
         if access_token:
             st.session_state["oauth_token"] = token_json
-            # fetch userinfo
             user = fetch_userinfo(access_token)
             st.session_state["user"] = user
+            st.session_state["oauth_state"] = None
         else:
             st.error("No access token received from Google.")
     except Exception as e:
         st.error(f"Error exchanging code for token: {e}")
-    # clear query params so we don't process code repeatedly
     st.query_params = {}
 
 # -----------------------
-# Not logged in -> show login link
+# Not logged in -> show login link (generate & store state)
 # -----------------------
 if st.session_state["oauth_token"] is None:
-    # create and store state to compare later (optional CSRF protection)
     state = str(uuid.uuid4())
     st.session_state["oauth_state"] = state
     login_link = build_login_link(state)
@@ -115,13 +128,10 @@ if st.session_state["oauth_token"] is None:
 # Logged-in: Sidebar UI
 # -----------------------
 user = st.session_state.get("user", {})
-# Simple global CSS to make images round
 st.markdown(
     """
     <style>
-    img {
-      border-radius: 50%;
-    }
+    img { border-radius: 50%; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -133,41 +143,33 @@ with st.sidebar:
     st.write(f"**{user.get('email', 'Unknown')}**")
     st.write("---")
     if st.button("Log out"):
-        # clear session and reload
         st.session_state["oauth_token"] = None
         st.session_state["user"] = None
         st.experimental_rerun()
 
-# -----------------------
-# Sidebar navigation
-# -----------------------
+# Sidebar nav
 page = st.sidebar.radio("Navigation", ["Home", "Data Profiler"])
 
 # -----------------------
-# HOME PAGE (style B)
+# HOME PAGE
 # -----------------------
 if page == "Home":
     st.title("🏠 Home")
     st.write(f"Welcome, **{user.get('email', '')}**!")
     st.write(
         """
-        This is your production-ready local app running on an Ubuntu VM (or local machine).
-        
-        Instructions:
-        - Use the **Data Profiler** page to upload or choose sample datasets.
-        - The Google account avatar appears in the sidebar.
-        - To run in a public environment later, change `REDIRECT_URI` to your public URL
-          and add that URL to the OAuth Authorized Redirect URIs in Google Cloud Console.
+        Your app is running on your Ubuntu VM at datasaas.store.
+        - Use the Data Profiler to upload or choose sample datasets.
+        - Avatar shown from Google profile.
         """
     )
 
 # -----------------------
-# DATA PROFILER PAGE
+# DATA PROFILER
 # -----------------------
 elif page == "Data Profiler":
     st.title("📊 Data Profiler")
     st.write("This page is visible only after login.")
-
     compare_mode = st.checkbox("Compare two datasets (Sweetviz compare)", value=False)
 
     def pick_dataset(label):
@@ -203,17 +205,12 @@ elif page == "Data Profiler":
     if df_main is not None and (not compare_mode or df_compare is not None):
         st.subheader("Data Preview – Dataset A")
         st.dataframe(df_main, height=350)
-
         if compare_mode:
             st.subheader("Data Preview – Dataset B")
             st.dataframe(df_compare, height=350)
-
         if st.button("Generate Sweetviz Report"):
             try:
-                if compare_mode:
-                    report = sv.compare([df_main, "A"], [df_compare, "B"])
-                else:
-                    report = sv.analyze(df_main)
+                report = sv.compare([df_main, "A"], [df_compare, "B"]) if compare_mode else sv.analyze(df_main)
                 report_file = "sweetviz_report.html"
                 report.show_html(report_file, open_browser=False)
                 with open(report_file, "r", encoding="utf-8") as f:
