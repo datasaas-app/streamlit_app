@@ -1,4 +1,4 @@
-# app.py (VM-only version)
+# app.py
 import streamlit as st
 import requests
 import uuid
@@ -13,20 +13,12 @@ st.set_page_config(page_title="Analytics App", layout="wide")
 # -----------------------
 # CONFIG / SECRETS
 # -----------------------
-# .streamlit/secrets.toml:
-# [google]
-# client_id = "xxx.apps.googleusercontent.com"
-# client_secret = "yyy"
-# [app]
-# DEPLOY_URL = "https://datasaas.store"  # your VM domain
-# LOCAL_URL = "http://localhost:8501"    # optional for local testing
-
 CLIENT_ID = st.secrets["google"]["client_id"]
 CLIENT_SECRET = st.secrets["google"]["client_secret"]
 DEPLOY_URL = st.secrets["app"]["DEPLOY_URL"]
 LOCAL_URL = st.secrets["app"].get("LOCAL_URL", "http://localhost:8501")
 
-# Use DEPLOY_URL only for redirect URI
+# OAuth endpoints
 REDIRECT_URI = DEPLOY_URL
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -85,7 +77,6 @@ if "code" in qp and st.session_state["oauth_token"] is None:
     returned_state = qp.get("state")
     returned_state = returned_state[0] if isinstance(returned_state, list) else returned_state
 
-    # Verify state exists and matches session
     if not returned_state or st.session_state.get("oauth_state") is None:
         st.error("OAuth state missing; possible CSRF attempt. Re-initiate login.")
         st.query_params = {}
@@ -113,7 +104,7 @@ if "code" in qp and st.session_state["oauth_token"] is None:
     st.query_params = {}
 
 # -----------------------
-# Not logged in -> show login link (generate & store state)
+# Not logged in -> show login link
 # -----------------------
 if st.session_state["oauth_token"] is None:
     state = str(uuid.uuid4())
@@ -147,7 +138,6 @@ with st.sidebar:
         st.session_state["user"] = None
         st.experimental_rerun()
 
-# Sidebar nav
 page = st.sidebar.radio("Navigation", ["Home", "Data Profiler"])
 
 # -----------------------
